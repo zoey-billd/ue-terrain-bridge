@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Gaea -> Houdini -> UE5 地形一键更新编排器.
+Gaea -> UE5 地形一键更新编排器.
 
 用法:
-  python terrain_bridge.py                  # 完整流程: Gaea -> Houdini -> UE
+  python terrain_bridge.py                  # 完整流程: Gaea -> 转换 -> UE
   python terrain_bridge.py --skip-gaea      # 跳过 Gaea, 直接用 gaea_out/height.*
-  python terrain_bridge.py --houdini-only   # 只跑 Houdini 处理
+  python terrain_bridge.py --convert-only   # 只跑高度图转换 (EXR -> 16-bit PNG)
   python terrain_bridge.py --ue-only        # 只跑 UE 导入+PCG重生成
   python terrain_bridge.py --dry-run        # 只打印计划, 不执行
 
 工作流:
-  1. Gaea: 等待 gaea_out/ 下的高度图 (用户从 Gaea 导出, 或 CLI 自动导出)
-  2. Houdini: hython 运行 houdini_process.py, 生成 16-bit 高度图 + 3 张权重图
+  1. Gaea: 等待 gaea_out/ 下的高度图 + 权重图 (用户从 Gaea 导出)
+  2. 转换: Python (OpenEXR+PIL) 把 EXR 高度图转成 16-bit PNG (UE 只认这个)
   3. UE: 通过 TCP 桥 (9877) 发送 ue_import.py, 导入高度图+权重图, 重生成 PCG
 """
 import argparse
@@ -84,18 +84,19 @@ def backups_root(cfg):
 
 def applied_output_files(cfg):
     """返回当前"已应用到 UE"的地形数据文件 (高度图 + 3 张权重图)."""
-    names = [os.path.basename(cfg["houdini"]["output_height"])]
-    names += [os.path.basename(v) for v in cfg["houdini"]["output_weights"].values()]
+    out = cfg["outputs"]
+    names = [os.path.basename(out["height_png"])]
+    names += [os.path.basename(v) for v in out["weights"].values()]
     return names
 
 
 def backup_outputs(cfg):
     """把当前已应用的地形数据快照到 backups/<时间戳>/.
 
-    在覆盖 houdini_out 之前调用, 因此最近一份快照就是"上一次更新前的状态",
+    在覆盖 converted 输出之前调用, 因此最近一份快照就是"上一次更新前的状态",
     回退时重放它即可把地形还原回去.
     """
-    src_dir = cfg["paths"]["houdini_out"]
+    src_dir = cfg["paths"]["converted"]
     present = [n for n in applied_output_files(cfg)
                if os.path.exists(os.path.join(src_dir, n))]
     if not present:
@@ -110,7 +111,7 @@ def backup_outputs(cfg):
 
 
 def restore_latest_backup(cfg):
-    """把最近一次快照恢复到 houdini_out; 返回快照目录 (无备份则 None)."""
+    """把最近一次快照恢复到 converted; 返回快照目录 (无备份则 None)."""
     root = backups_root(cfg)
     if not os.path.isdir(root):
         return None
@@ -118,7 +119,7 @@ def restore_latest_backup(cfg):
     if not snaps:
         return None
     snap = os.path.join(root, snaps[-1])
-    dst_dir = cfg["paths"]["houdini_out"]
+    dst_dir = cfg["paths"]["converted"]
     os.makedirs(dst_dir, exist_ok=True)
     for n in os.listdir(snap):
         shutil.copy2(os.path.join(snap, n), os.path.join(dst_dir, n))
@@ -185,57 +186,53 @@ def stage_gaea(cfg, dry_run=False):
     return None
 
 
-# ── Stage 2: Houdini ───────────────────────────────────────────────────────
-def stage_houdini(cfg, input_heightmap, dry_run=False):
-    """Houdini 处理阶段: 高度图 -> 高度图 + 权重图."""
-    h = cfg["houdini"]
-    if not h.get("enabled", True):
-        log("[Houdini] 已禁用, 跳过")
-        return True
+def stage_convert(cfg, heightmap_path, dry_run=False):
+    """高度图转换: EXR -> 16-bit PNG (替代 Houdini 处理).
 
-    hython = h["hython"]
-    script = h["script"]
-
-    if not os.path.exists(hython):
-        log("[Houdini] hython 未找到: %s" % hython)
-        return False
-    if not os.path.exists(script):
-        log("[Houdini] 脚本未找到: %s" % script)
-        return False
-
-    out_h = h["output_height"]
-    out_g = h["output_weights"]["grass"]
-    out_r = h["output_weights"]["rock"]
-    out_d = h["output_weights"]["dirt"]
-
-    cmd = [hython, script, input_heightmap, out_h, out_g, out_r, out_d]
-    log("[Houdini] 执行处理...")
-    log("[Houdini] 输入: %s" % input_heightmap)
-
+    UE 的 Landscape 导入只接受 16-bit PNG / r16, 不接受 EXR.
+    这里用 OpenEXR + PIL 直接在 Python 里转换, 不需要 Houdini.
+    """
+    out = cfg["outputs"]["height_png"]
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    log("[Convert] %s -> %s" % (heightmap_path, out))
     if dry_run:
-        log("[Houdini] dry-run, 跳过执行")
         return True
+
+    ext = os.path.splitext(heightmap_path)[1].lower()
+    try:
+        from PIL import Image
+        import numpy as np
+    except ImportError as exc:
+        log("[Convert] 缺少依赖 (PIL / numpy): %s" % exc)
+        return False
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        print(result.stdout)
-        if result.returncode != 0:
-            log("[Houdini] 处理失败 (exit=%d)" % result.returncode)
-            if result.stderr:
-                print(result.stderr)
-            return False
-        # 验证输出
-        for p in (out_h, out_g, out_r, out_d):
-            if not os.path.exists(p):
-                log("[Houdini] 输出缺失: %s" % p)
+        if ext == ".exr":
+            try:
+                import OpenEXR
+            except ImportError:
+                log("[Convert] 缺少 OpenEXR, 无法读 EXR. 请在 Gaea 里改导出 16-bit PNG, 或 pip install OpenEXR")
                 return False
-        log("[Houdini] 处理完成")
+            f = OpenEXR.File(heightmap_path)
+            chans = f.channels()
+            if not chans:
+                log("[Convert] EXR 里没有通道")
+                return False
+            key = "Y" if "Y" in chans else ("R" if "R" in chans else list(chans)[0])
+            pixels = chans[key].pixels.astype(np.float64)
+            lo, hi = float(pixels.min()), float(pixels.max())
+            norm = (pixels - lo) / (hi - lo + 1e-12)
+            p16 = np.clip(norm * 65535.0, 0, 65535).astype(np.uint16)
+            Image.fromarray(p16, mode="I;16").save(out)
+            log("[Convert] 完成: %dx%d, 原始范围 %.4f - %.4f" % (
+                pixels.shape[1], pixels.shape[0], lo, hi))
+        else:
+            import shutil as _sh
+            _sh.copy2(heightmap_path, out)
+            log("[Convert] 非 EXR 文件, 直接复制")
         return True
-    except subprocess.TimeoutExpired:
-        log("[Houdini] 处理超时")
-        return False
-    except Exception as e:
-        log("[Houdini] 执行错误: %s" % e)
+    except Exception as exc:
+        log("[Convert] 失败: %s" % exc)
         return False
 
 
@@ -268,14 +265,14 @@ def send_to_bridge(code, port=9877, timeout=600):
 def stage_ue(cfg, dry_run=False):
     """UE 导入阶段: 导入高度图+权重图, 重生成 PCG."""
     ue = cfg["unreal"]
-    h = cfg["houdini"]
+    out = cfg["outputs"]
 
     # 构造注入到 ue_import.py 的配置 JSON
     inject_cfg = {
-        "height_png": h["output_height"],
-        "weight_grass": h["output_weights"]["grass"],
-        "weight_rock": h["output_weights"]["rock"],
-        "weight_dirt": h["output_weights"]["dirt"],
+        "height_png": out["height_png"],
+        "weight_grass": out["weights"]["grass"],
+        "weight_rock": out["weights"]["rock"],
+        "weight_dirt": out["weights"]["dirt"],
         "layer_mapping": ue["layer_mapping"],
         "landscape_label": ue["landscape_label"],
         "regen_pcg_labels": ue["regen_pcg_labels"],
@@ -319,7 +316,7 @@ def stage_ue(cfg, dry_run=False):
 
 # ── Watch mode: auto-trigger when Gaea exports a new heightmap ──────────────
 def run_pipeline(cfg, dry_run=False):
-    """Run Houdini + UE stages (used by watch mode and direct calls)."""
+    """Run convert + UE stages (used by watch mode and direct calls)."""
     heightmap = find_heightmap(search_dirs(cfg))
     if not heightmap:
         log("未找到高度图 (检查 %s)" % ", ".join(search_dirs(cfg)))
@@ -329,9 +326,9 @@ def run_pipeline(cfg, dry_run=False):
     if not dry_run:
         backup_outputs(cfg)
 
-    log("--- Houdini 处理 ---")
-    if not stage_houdini(cfg, heightmap, dry_run=dry_run):
-        log("Houdini 阶段失败")
+    log("--- 高度图转换 ---")
+    if not stage_convert(cfg, heightmap, dry_run=dry_run):
+        log("高度图转换失败")
         return False
 
     log("--- UE 导入 + PCG 重生成 ---")
@@ -383,9 +380,9 @@ def watch_mode(cfg, interval=5.0):
 
 # ── Main ────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Gaea -> Houdini -> UE5 地形桥接")
+    parser = argparse.ArgumentParser(description="Gaea -> UE5 地形桥接")
     parser.add_argument("--skip-gaea", action="store_true", help="跳过 Gaea 阶段")
-    parser.add_argument("--houdini-only", action="store_true", help="只跑 Houdini")
+    parser.add_argument("--convert-only", action="store_true", help="只跑高度图转换(EXR -> 16-bit PNG)")
     parser.add_argument("--ue-only", action="store_true", help="只跑 UE 导入")
     parser.add_argument("--watch", action="store_true", help="监听 Gaea 导出目录, 自动触发更新")
     parser.add_argument("--rollback", action="store_true", help="回退到上一次更新前的地形数据")
@@ -397,7 +394,7 @@ def main():
 
     if args.watch:
         log("=" * 60)
-        log("Gaea -> Houdini -> UE5 地形桥接 (监听模式)")
+        log("Gaea -> UE5 地形桥接 (监听模式)")
         log("=" * 60)
         watch_mode(cfg)
         return
@@ -412,13 +409,13 @@ def main():
         sys.exit(0 if stage_ue(cfg, dry_run=args.dry_run) else 1)
 
     log("=" * 60)
-    log("Gaea -> Houdini -> UE5 地形桥接")
+    log("Gaea -> UE5 地形桥接")
     log("=" * 60)
 
     # 决定运行哪些阶段
-    run_gaea = not (args.skip_gaea or args.houdini_only or args.ue_only)
-    run_houdini = not args.ue_only
-    run_ue = not args.houdini_only
+    run_gaea = not (args.skip_gaea or args.convert_only or args.ue_only)
+    run_convert = not args.ue_only
+    run_ue = not args.convert_only
 
     # Stage 1: Gaea
     heightmap = None
@@ -436,20 +433,20 @@ def main():
             sys.exit(1)
         log("[Gaea] 使用已有高度图: %s" % heightmap)
 
-    # Stage 2: Houdini
-    if run_houdini:
+    # Stage 2: 高度图转换(EXR -> 16-bit PNG)
+    if run_convert:
         if not args.dry_run:
             backup_outputs(cfg)
-        log("--- Stage 2: Houdini 处理 ---")
-        ok = stage_houdini(cfg, heightmap, dry_run=args.dry_run)
+        log("--- Stage 2: 高度图转换 ---")
+        ok = stage_convert(cfg, heightmap, dry_run=args.dry_run)
         if not ok:
-            log("Houdini 阶段失败, 终止")
+            log("高度图转换失败, 终止")
             sys.exit(1)
 
     # Stage 3: UE
     if run_ue:
         # --ue-only 会直接覆盖地形, 同样需要先快照
-        if not args.dry_run and not run_houdini:
+        if not args.dry_run and not run_convert:
             backup_outputs(cfg)
         log("--- Stage 3: UE 导入 + PCG 重生成 ---")
         ok = stage_ue(cfg, dry_run=args.dry_run)

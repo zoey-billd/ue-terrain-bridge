@@ -141,7 +141,7 @@ def ask_project():
 # 安装
 # --------------------------------------------------------------------------- #
 
-def build_config(project_root, houdini, gaea):
+def build_config(project_root, gaea):
     """基于 config.example.json 生成填好路径的 config。"""
     bridge_root = os.path.join(project_root, "Content", "Python", "TerrainBridge")
 
@@ -155,7 +155,7 @@ def build_config(project_root, houdini, gaea):
     p["project_root"] = slash(project_root)
     p["bridge_root"] = slash(bridge_root)
     p["gaea_out"] = slash(os.path.join(bridge_root, "gaea_out"))
-    p["houdini_out"] = slash(os.path.join(bridge_root, "houdini_out"))
+    p["converted"] = slash(os.path.join(bridge_root, "converted"))
     p["backups"] = slash(os.path.join(bridge_root, "backups"))
     p["logs"] = slash(os.path.join(bridge_root, "logs"))
     # 自动检测 Gaea Build 输出目录(支持 Gaea 1/2)
@@ -166,34 +166,31 @@ def build_config(project_root, houdini, gaea):
 
     if gaea:
         cfg["gaea"]["gaea_exe"] = slash(gaea)
-    if houdini:
-        cfg["houdini"]["hython"] = slash(houdini)
-    cfg["houdini"]["script"] = slash(os.path.join(bridge_root, "houdini_process.py"))
-    cfg["houdini"]["input_heightmap"] = slash(os.path.join(bridge_root, "gaea_out", "height.exr"))
-    cfg["houdini"]["output_height"] = slash(os.path.join(bridge_root, "houdini_out", "height_16bit.png"))
+
+    # outputs: 转换后的高度图 + Gaea 直接导出的权重图
+    out = cfg["outputs"]
+    out["height_png"] = slash(os.path.join(bridge_root, "converted", "height_16bit.png"))
     for key in ("grass", "rock", "dirt"):
-        cfg["houdini"]["output_weights"][key] = slash(
-            os.path.join(bridge_root, "houdini_out", "weight_%s.png" % key)
-        )
+        out["weights"][key] = slash(os.path.join(bridge_root, "gaea_out", "W_%s.png" % key))
     return cfg
 
 
-def install(project_root, houdini, gaea):
+def install(project_root, gaea):
     bridge_root = os.path.join(project_root, "Content", "Python", "TerrainBridge")
     os.makedirs(bridge_root, exist_ok=True)
 
     copied = []
-    for fname in ("terrain_bridge.py", "houdini_process.py", "ue_import.py", "ue_bridge.py"):
+    for fname in ("terrain_bridge.py", "ue_import.py", "ue_bridge.py"):
         src = os.path.join(HERE, fname)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(bridge_root, fname))
             copied.append(fname)
 
-    cfg = build_config(project_root, houdini, gaea)
+    cfg = build_config(project_root, gaea)
     with open(os.path.join(bridge_root, "config.json"), "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-    for sub in ("gaea_out", "houdini_out", "backups", "logs"):
+    for sub in ("gaea_out", "converted", "backups", "logs"):
         os.makedirs(os.path.join(bridge_root, sub), exist_ok=True)
 
     return bridge_root, copied
@@ -205,18 +202,14 @@ def install(project_root, houdini, gaea):
 
 def main():
     print("=" * 56)
-    print("  Gaea -> Houdini -> UE5 地形桥接  一键安装")
+    print("  Gaea -> UE5 地形桥接  一键安装")
     print("=" * 56)
 
-    print("\n[1/4] 检测 Houdini ...")
-    houdini = find_houdini()
-    print("  找到:", houdini if houdini else "未找到(稍后可手动改 config.json)")
-
-    print("\n[2/4] 检测 Gaea ...")
+    print("\n[1/3] 检测 Gaea ...")
     gaea = find_gaea()
     print("  找到:", gaea if gaea else "未找到(稍后可手动改 config.json)")
 
-    print("\n[3/4] 定位 UE 项目 ...")
+    print("\n[2/3] 定位 UE 项目 ...")
     project = detect_project_from_here()
     if project:
         print("  从当前目录识别到:", project)
@@ -226,8 +219,8 @@ def main():
         print("\n[失败] 没拿到有效的 UE 项目路径,安装中止。")
         return 1
 
-    print("\n[4/4] 复制文件 + 生成 config ...")
-    bridge_root, copied = install(project, houdini, gaea)
+    print("\n[3/3] 复制文件 + 生成 config ...")
+    bridge_root, copied = install(project, gaea)
     print("  安装到:", bridge_root)
     for f in copied:
         print("    +", f)

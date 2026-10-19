@@ -7,7 +7,7 @@
     "gaea_extra_roots": [
       "C:/Users/YOUR_USER/Documents/Gaea/Builds"
     ],
-    "houdini_out": "C:/Path/To/YourUEProject/TerrainBridge/houdini_out",
+    "converted": "C:/Path/To/YourUEProject/TerrainBridge/converted",
     "backups": "C:/Path/To/YourUEProject/TerrainBridge/backups",
     "logs": "C:/Path/To/YourUEProject/TerrainBridge/logs"
   },
@@ -15,26 +15,15 @@
     "enabled": true,
     "gaea_exe": "C:/Path/To/Gaea/Gaea.exe",
     "heightmap_filename": "height.exr",
-    "mode": "watch",
-    "_comment_mode": "watch=等待手动导出的高度图; cli=尝试用 Gaea 命令行导出(若 BuildManager 可用)"
+    "mode": "watch"
   },
-  "houdini": {
-    "enabled": true,
-    "hython": "C:/Path/To/Houdini/Houdini 21.0.631/bin/hython.exe",
-    "script": "C:/Path/To/YourUEProject/TerrainBridge/houdini_process.py",
-    "input_heightmap": "C:/Path/To/YourUEProject/TerrainBridge/gaea_out/height.exr",
-    "output_height": "C:/Path/To/YourUEProject/TerrainBridge/houdini_out/height_16bit.png",
-    "output_weights": {
-      "grass": "C:/Path/To/YourUEProject/TerrainBridge/houdini_out/weight_grass.png",
-      "rock": "C:/Path/To/YourUEProject/TerrainBridge/houdini_out/weight_rock.png",
-      "dirt": "C:/Path/To/YourUEProject/TerrainBridge/houdini_out/weight_dirt.png"
-    },
-    "weight_rules": {
-      "_comment": "权重图生成规则, 基于坡度/海拔/曲率",
-      "grass_max_slope_deg": 30,
-      "grass_max_elev": 2000,
-      "rock_min_slope_deg": 35,
-      "dirt_slope_range": [20, 45]
+  "outputs": {
+    "_comment": "height_png 是插件自动转换出的 16-bit PNG;weights 是 Gaea 直接导出的权重图(在 Gaea 里输出 PNG)",
+    "height_png": "C:/Path/To/YourUEProject/TerrainBridge/converted/height_16bit.png",
+    "weights": {
+      "grass": "C:/Path/To/YourUEProject/TerrainBridge/gaea_out/W_grass.png",
+      "rock": "C:/Path/To/YourUEProject/TerrainBridge/gaea_out/W_rock.png",
+      "dirt": "C:/Path/To/YourUEProject/TerrainBridge/gaea_out/W_dirt.png"
     }
   },
   "unreal": {
