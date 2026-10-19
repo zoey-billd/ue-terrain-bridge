@@ -1,0 +1,10 @@
+# 生成物(不提交)
+gaea_out/
+houdini_out/
+backups/
+logs/
+__pycache__/
+*.pyc
+
+# 个人配置(用 config.example.json 复制,不提交自己的路径)
+config.json
